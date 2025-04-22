@@ -96,6 +96,8 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
+set(Sophus_DIR "/home/caros/projects/catkin_fast-livo2-notes/Sophus/build")
+set(CMAKE_PREFIX_PATH "${Sophus_DIR};${CMAKE_PREFIX_PATH}")
 find_package(Sophus REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
 

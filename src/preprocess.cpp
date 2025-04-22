@@ -945,65 +945,90 @@ void Preprocess::pub_func(PointCloudXYZI &pl, const ros::Time &ct)
 
 int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i_cur, uint &i_nex, Eigen::Vector3d &curr_direct)
 {
+  // 计算当前点周围点的搜索范围，disA和disB是预定义的参数
+  // 搜索范围与当前点到激光雷达的距离成正比，距离越远，搜索范围越大
   double group_dis = disA * types[i_cur].range + disB;
   group_dis = group_dis * group_dis;
   // i_nex = i_cur;
 
-  double two_dis;
-  vector<double> disarr;
-  disarr.reserve(20);
+  double two_dis; // 用于存储两点之间的平方距离
+  vector<double> disarr; // 存储相邻点之间的距离
+  disarr.reserve(20);  // 预分配空间，提高效率
 
+  // 收集当前点周围group_size个点的距离信息
   for (i_nex = i_cur; i_nex < i_cur + group_size; i_nex++)
   {
+     // 如果点太近（在盲区内），则返回2表示无效
     if (types[i_nex].range < blind_sqr)
     {
       curr_direct.setZero();
       return 2;
     }
+    // 存储相邻点之间的距离
     disarr.push_back(types[i_nex].dista);
   }
 
+  // 相当与while(true)
+  // 继续扩展搜索范围，直到达到group_dis或遇到盲区点
   for (;;)
   {
+    // 检查索引是否越界
     if ((i_cur >= pl.size()) || (i_nex >= pl.size())) break;
-
+    
+    // 如果点太近，返回2表示无效
     if (types[i_nex].range < blind_sqr)
     {
       curr_direct.setZero();
       return 2;
     }
+
+    // 计算当前点与搜索点之间的向量
     vx = pl[i_nex].x - pl[i_cur].x;
     vy = pl[i_nex].y - pl[i_cur].y;
     vz = pl[i_nex].z - pl[i_cur].z;
+    // 计算两点之间的平方距离
     two_dis = vx * vx + vy * vy + vz * vz;
+    // 如果距离超过搜索范围，则停止搜索
     if (two_dis >= group_dis) { break; }
+    // 存储距离信息
     disarr.push_back(types[i_nex].dista);
+    // 继续搜索下一个点
     i_nex++;
   }
 
-  double leng_wid = 0;
-  double v1[3], v2[3];
+  // 计算点集的平面度
+  double leng_wid = 0; // 用于存储平面的宽度
+  double v1[3], v2[3]; // 临时向量
+  // 遍历所有收集到的点，计算平面的宽度
   for (uint j = i_cur + 1; j < i_nex; j++)
   {
+    // 检查索引是否越界
     if ((j >= pl.size()) || (i_cur >= pl.size())) break;
+    // 计算向量v1（从当前点到搜索点的向量）
     v1[0] = pl[j].x - pl[i_cur].x;
     v1[1] = pl[j].y - pl[i_cur].y;
     v1[2] = pl[j].z - pl[i_cur].z;
 
+     // 计算向量v2（v1与搜索方向向量的叉积）
     v2[0] = v1[1] * vz - vy * v1[2];
     v2[1] = v1[2] * vx - v1[0] * vz;
     v2[2] = v1[0] * vy - vx * v1[1];
 
+    // 计算叉积的模长，用于评估平面的宽度
     double lw = v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2];
+    // 更新最大宽度
     if (lw > leng_wid) { leng_wid = lw; }
   }
 
+  // 检查点集是否足够平坦
+  // 如果两点距离的平方与平面宽度的比值小于阈值，则认为不是平面
   if ((two_dis * two_dis / leng_wid) < p2l_ratio)
   {
     curr_direct.setZero();
     return 0;
   }
 
+  // 对距离数组进行排序，用于后续的平面度判断
   uint disarrsize = disarr.size();
   for (uint j = 0; j < disarrsize - 1; j++)
   {
@@ -1018,17 +1043,22 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
     }
   }
 
+  // 检查最小距离是否过小
   if (disarr[disarr.size() - 2] < 1e-16)
   {
     curr_direct.setZero();
-    return 0;
+    return 0; // 返回0表示不是平面
   }
 
+  // 根据激光雷达类型进行不同的平面度判断
   if (lidar_type == AVIA)
   {
+    // 计算最大距离与中位距离的比值
     double dismax_mid = disarr[0] / disarr[disarrsize / 2];
+    // 计算中位距离与最小距离的比值
     double dismid_min = disarr[disarrsize / 2] / disarr[disarrsize - 2];
 
+    // 如果比值超过阈值，则认为不是平面
     if (dismax_mid >= limit_maxmid || dismid_min >= limit_midmin)
     {
       curr_direct.setZero();
@@ -1037,6 +1067,7 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
   }
   else
   {
+    // 对于其他类型的激光雷达，只检查最大距离与最小距离的比值
     double dismax_min = disarr[0] / disarr[disarrsize - 2];
     if (dismax_min >= limit_maxmin)
     {
@@ -1045,9 +1076,10 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
     }
   }
 
+  // 如果通过了所有检查，则计算平面的法向量
   curr_direct << vx, vy, vz;
-  curr_direct.normalize();
-  return 1;
+  curr_direct.normalize(); // 归一化法向量
+  return 1; // 返回1表示是平面
 }
 
 bool Preprocess::edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, Surround nor_dir)

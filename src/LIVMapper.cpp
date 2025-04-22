@@ -182,9 +182,26 @@ void LIVMapper::initializeFiles()
   fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
   fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), std::ios::out);
 }
-
+/**
+ * @brief 初始化ROS订阅器和发布器
+ * @details 该函数负责初始化所有ROS相关的订阅器和发布器，包括:
+ *          - 激光雷达点云订阅器(根据激光雷达类型选择不同的回调函数)
+ *          - IMU数据订阅器
+ *          - 图像数据订阅器
+ *          - 各类点云发布器(注册点云、效果点云、地图点云等)
+ *          - 里程计和路径发布器
+ *          - 可视化相关的发布器(法向量、体素等)
+ *          - 动态物体点云发布器
+ *          - MAVROS位姿发布器
+ *          - 图像发布器
+ *          - IMU预测里程计发布器
+ * @param nh ROS节点句柄,用于创建订阅器和发布器
+ * @param it 图像传输对象,用于创建图像相关的发布器
+ * @note 该函数在系统初始化时被调用,建立了系统与ROS通信的桥梁
+ */
 void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_transport::ImageTransport &it) 
 {
+  // 雷达、相机、IMU数据的订阅器
   sub_pcl = p_pre->lidar_type == AVIA ? 
             nh.subscribe(lid_topic, 200000, &LIVMapper::livox_pcl_cbk, this): 
             nh.subscribe(lid_topic, 200000, &LIVMapper::standard_pcl_cbk, this);
@@ -209,6 +226,15 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   imu_prop_timer = nh.createTimer(ros::Duration(0.004), &LIVMapper::imu_prop_callback, this);
   voxelmap_manager->voxel_map_pub_= nh.advertise<visualization_msgs::MarkerArray>("/planes", 10000);
 }
+/**
+ * @brief 处理系统的第一帧数据
+ * @details 该函数负责处理系统接收到的第一帧激光雷达数据:
+ *          - 记录第一帧激光雷达的时间戳
+ *          - 将该时间戳传递给IMU处理模块用于数据记录
+ *          - 设置first_frame标志,表示已经处理了第一帧
+ * @note 该函数在系统运行过程中只执行一次,用于系统初始化
+ *       只有当is_first_frame为false时才会执行相关操作
+ */
 
 void LIVMapper::handleFirstFrame() 
 {
@@ -220,21 +246,23 @@ void LIVMapper::handleFirstFrame()
     cout << "FIRST LIDAR FRAME!" << endl;
   }
 }
-
+// 这个函数实现了重力对齐，将系统的坐标系与重力方向对齐。
+// 它通过计算当前估计的重力方向与标准重力方向(0,0,-1)之间的旋转，然后将这个旋转应用到系统状态的位置、旋转、速度和重力向量上。
 void LIVMapper::gravityAlignment() 
 {
   if (!p_imu->imu_need_init && !gravity_align_finished) 
   {
     std::cout << "Gravity Alignment Starts" << std::endl;
-    V3D ez(0, 0, -1), gz(_state.gravity);
-    Quaterniond G_q_I0 = Quaterniond::FromTwoVectors(gz, ez);
-    M3D G_R_I0 = G_q_I0.toRotationMatrix();
+    V3D ez(0, 0, -1), gz(_state.gravity);  // 定义重力方向向量
+    Quaterniond G_q_I0 = Quaterniond::FromTwoVectors(gz, ez);  // 计算从当前重力方向到标准重力方向的四元数
+    M3D G_R_I0 = G_q_I0.toRotationMatrix();  // 转换为旋转矩阵
 
-    _state.pos_end = G_R_I0 * _state.pos_end;
-    _state.rot_end = G_R_I0 * _state.rot_end;
-    _state.vel_end = G_R_I0 * _state.vel_end;
-    _state.gravity = G_R_I0 * _state.gravity;
-    gravity_align_finished = true;
+    // 对状态变量进行重力对齐变换
+    _state.pos_end = G_R_I0 * _state.pos_end;  // 变换位置
+    _state.rot_end = G_R_I0 * _state.rot_end;  // 变换旋转
+    _state.vel_end = G_R_I0 * _state.vel_end;  // 变换速度
+    _state.gravity = G_R_I0 * _state.gravity;  // 变换重力向量
+    gravity_align_finished = true;  // 标记重力对齐已完成
     std::cout << "Gravity Alignment Finished" << std::endl;
   }
 }
@@ -242,11 +270,13 @@ void LIVMapper::gravityAlignment()
 void LIVMapper::processImu() 
 {
   // double t0 = omp_get_wtime();
-
+  // 处理IMU数据，更新系统状态
   p_imu->Process2(LidarMeasures, _state, feats_undistort);
 
+  // 如果启用了重力对齐，执行重力对齐
   if (gravity_align_en) gravityAlignment();
 
+  // 保存当前状态用于后续处理
   state_propagat = _state;
   voxelmap_manager->state_ = _state;
   voxelmap_manager->feats_undistort_ = feats_undistort;
@@ -274,11 +304,13 @@ void LIVMapper::stateEstimationAndMapping()
 
 void LIVMapper::handleVIO() 
 {
+  // 记录当前状态到日志
   euler_cur = RotMtoEuler(_state.rot_end);
   fout_pre << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
             << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << std::endl;
-    
+  
+  // 检查点云数据是否有效
   if (pcl_w_wait_pub->empty() || (pcl_w_wait_pub == nullptr)) 
   {
     std::cout << "[ VIO ] No point!!!" << std::endl;
@@ -287,6 +319,7 @@ void LIVMapper::handleVIO()
     
   std::cout << "[ VIO ] Raw feature num: " << pcl_w_wait_pub->points.size() << std::endl;
 
+  // 根据需要设置调试标志
   if (fabs((LidarMeasures.last_lio_update_time - _first_lidar_time) - plot_time) < (frame_cnt / 2 * 0.1)) 
   {
     vio_manager->plot_flag = true;
@@ -296,8 +329,10 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
+  // 处理当前帧图像
   vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
 
+  // 如果启用了IMU传播，更新状态
   if (imu_prop_enable) 
   {
     ekf_finish_once = true;
@@ -342,11 +377,13 @@ void LIVMapper::handleLIO()
 
   double t0 = omp_get_wtime();
 
+  // 对点云进行下采样
   downSizeFilterSurf.setInputCloud(feats_undistort);
   downSizeFilterSurf.filter(*feats_down_body);
   
   double t_down = omp_get_wtime();
 
+  // 准备点云数据用于后续处理
   feats_down_size = feats_down_body->points.size();
   voxelmap_manager->feats_down_body_ = feats_down_body;
   transformLidar(_state.rot_end, _state.pos_end, feats_down_body, feats_down_world);
@@ -367,6 +404,7 @@ void LIVMapper::handleLIO()
 
   double t2 = omp_get_wtime();
 
+  // 如果启用了IMU传播，更新状态
   if (imu_prop_enable) 
   {
     ekf_finish_once = true;
@@ -375,6 +413,7 @@ void LIVMapper::handleLIO()
     state_update_flg = true;
   }
 
+  // 如果启用了位姿输出，保存位姿到文件
   if (pose_output_en) 
   {
     static bool pos_opend = false;
@@ -398,14 +437,17 @@ void LIVMapper::handleLIO()
             << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
   }
   
+  // 发布里程计数据
   euler_cur = RotMtoEuler(_state.rot_end);
   geoQuat = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
   publish_odometry(pubOdomAftMapped);
 
   double t3 = omp_get_wtime();
 
+  // 更新体素地图
   PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI());
   transformLidar(_state.rot_end, _state.pos_end, feats_down_body, world_lidar);
+  // 更新点云协方差和体素地图
   for (size_t i = 0; i < world_lidar->points.size(); i++) 
   {
     voxelmap_manager->pv_list_[i].point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
@@ -421,11 +463,13 @@ void LIVMapper::handleLIO()
   
   double t4 = omp_get_wtime();
 
+  // 如果启用了地图滑动窗口，执行地图滑动
   if(voxelmap_manager->config_setting_.map_sliding_en)
   {
     voxelmap_manager->mapSliding();
   }
   
+  // 准备点云数据用于发布
   PointCloudXYZI::Ptr laserCloudFullRes(dense_map_en ? feats_undistort : feats_down_body);
   int size = laserCloudFullRes->points.size();
   PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
@@ -436,6 +480,7 @@ void LIVMapper::handleLIO()
   }
   *pcl_w_wait_pub = *laserCloudWorld;
 
+  // 发布各种数据
   if (!img_en) publish_frame_world(pubLaserCloudFullRes, vio_manager);
   if (pub_effect_point_en) publish_effect_world(pubLaserCloudEffect, voxelmap_manager->ptpl_list_);
   if (voxelmap_manager->config_setting_.is_pub_plane_map_) voxelmap_manager->pubVoxelMap();
@@ -444,7 +489,7 @@ void LIVMapper::handleLIO()
 
   frame_num++;
   aver_time_consu = aver_time_consu * (frame_num - 1) / frame_num + (t4 - t0) / frame_num;
-
+  // 统计和打印时间信息
   // aver_time_icp = aver_time_icp * (frame_num - 1) / frame_num + (t2 - t1) / frame_num;
   // aver_time_map_inre = aver_time_map_inre * (frame_num - 1) / frame_num + (t4 - t3) / frame_num;
   // aver_time_solve = aver_time_solve * (frame_num - 1) / frame_num + (solve_time) / frame_num;
@@ -477,20 +522,25 @@ void LIVMapper::handleLIO()
 
 void LIVMapper::savePCD() 
 {
+  // 如果启用了点云保存且有点云数据可保存
   if (pcd_save_en && (pcl_wait_save->points.size() > 0 || pcl_wait_save_intensity->points.size() > 0) && pcd_save_interval < 0) 
   {
+    // // 设置保存路径
     std::string raw_points_dir = std::string(ROOT_DIR) + "Log/PCD/all_raw_points.pcd";
     std::string downsampled_points_dir = std::string(ROOT_DIR) + "Log/PCD/all_downsampled_points.pcd";
     pcl::PCDWriter pcd_writer;
 
+    // 如果有图像数据，保存彩色点云
     if (img_en)
     {
+      // 对点云进行下采样
       pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
       pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
       voxel_filter.setInputCloud(pcl_wait_save);
       voxel_filter.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
       voxel_filter.filter(*downsampled_cloud);
   
+      // 保存原始点云和下采样点云
       pcd_writer.writeBinary(raw_points_dir, *pcl_wait_save); // Save the raw point cloud data
       std::cout << GREEN << "Raw point cloud data saved to: " << raw_points_dir 
                 << " with point count: " << pcl_wait_save->points.size() << RESET << std::endl;
@@ -499,6 +549,7 @@ void LIVMapper::savePCD()
       std::cout << GREEN << "Downsampled point cloud data saved to: " << downsampled_points_dir 
                 << " with point count after filtering: " << downsampled_cloud->points.size() << RESET << std::endl;
 
+      // 如果启用了COLMAP输出，保存点云数据到COLMAP格式
       if(colmap_output_en)
       {
         fout_points << "# 3D point list with one line of data per point\n";
@@ -517,7 +568,8 @@ void LIVMapper::savePCD()
       }
     }
     else
-    {      
+    { 
+      // 如果没有图像数据，保存强度点云     
       pcd_writer.writeBinary(raw_points_dir, *pcl_wait_save_intensity);
       std::cout << GREEN << "Raw point cloud data saved to: " << raw_points_dir 
                 << " with point count: " << pcl_wait_save_intensity->points.size() << RESET << std::endl;
@@ -536,12 +588,15 @@ void LIVMapper::run()
       rate.sleep();
       continue;
     }
+    // 处理第一帧
     handleFirstFrame();
 
+    // 预测？
     processImu();
 
     // if (!p_imu->imu_time_init) continue;
 
+    // 状态更新+建图？
     stateEstimationAndMapping();
   }
   savePCD();
@@ -705,6 +760,22 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
   mtx_buffer.unlock();
   sig_buffer.notify_all();
 }
+/**
+ * @brief Livox激光雷达点云数据回调函数
+ * @details 该函数负责处理来自Livox激光雷达的点云数据:
+ *          - 检查激光雷达使能标志
+ *          - 对IMU和激光雷达数据进行时间同步检查
+ *          - 处理点云数据并存入缓冲区
+ *          - 更新时间戳信息
+ * @param msg_in 输入的Livox点云消息指针
+ * @note 该函数在接收到Livox点云数据时被调用
+ *       主要功能包括:
+ *       1. 检查IMU和激光雷达时间差,必要时进行同步
+ *       2. 检查时间戳是否回环,如有需要清空缓冲区
+ *       3. 预处理点云数据并存入缓冲区
+ *       4. 更新最新激光雷达时间戳
+ *       5. 通知其他线程处理新数据
+ */
 
 void LIVMapper::livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_in)
 {
@@ -867,15 +938,20 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
 
 bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 {
+  // 首先检查各个传感器的数据缓冲区是否为空。如果启用了某个传感器但其缓冲区为空，则返回 false。
   if (lid_raw_data_buffer.empty() && lidar_en) return false;
   if (img_buffer.empty() && img_en) return false;
   if (imu_buffer.empty() && imu_en) return false;
 
   switch (slam_mode_)
   {
-  case ONLY_LIO:
+  // 只启用LiDAR和IMU
+  // 1.获取激光雷达帧的开始和结束时间; 2.等待足够的 IMU 数据覆盖整个激光帧; 3.收集对应时间段内的 IMU 数据; 4.设置标志并返回 true;
+  case ONLY_LIO: 
   {
+    // 初始化时间戳
     if (meas.last_lio_update_time < 0.0) meas.last_lio_update_time = lid_header_time_buffer.front();
+    // 如果尚未处理激光雷达数据
     if (!lidar_pushed)
     {
       // If not push the lidar into measurement data buffer
@@ -887,7 +963,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       meas.pcl_proc_cur = meas.lidar;
       lidar_pushed = true;                                                                                       // flag
     }
-
+    // 等待IMU数据覆盖整个激光帧时间段
     if (imu_en && last_timestamp_imu < meas.lidar_frame_end_time)
     { // waiting imu message needs to be
       // larger than _lidar_frame_end_time,
@@ -896,10 +972,12 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       return false;
     }
 
+    // 收集IMU数据
     struct MeasureGroup m; // standard method to keep imu message.
 
     m.imu.clear();
     m.lio_time = meas.lidar_frame_end_time;
+    // ... 收集IMU数据的代码 ...
     mtx_buffer.lock();
     while (!imu_buffer.empty())
     {
@@ -921,6 +999,9 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     break;
   }
 
+  // 需要同步三种传感器的数据
+  // LIVO 模式下，系统在 LIO 和 VIO 之间交替处理：
+  // 1. 当前状态为 WAIT 或 VIO 时，处理 LIO 更新；2.当前状态为 LIO 时，处理 VIO 更新；3.每次更新都会收集相应的传感器数据并设置适当的标志；
   case LIVO:
   {
     /*** For LIVO mode, the time of LIO update is set to be the same as VIO, LIO
@@ -938,6 +1019,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       /*** has img topic, but img topic timestamp larger than lidar end time,
        * process lidar topic. After LIO update, the meas.lidar_frame_end_time
        * will be refresh. ***/
+      // ... 检查时间戳有效性 ...
       if (meas.last_lio_update_time < 0.0) meas.last_lio_update_time = lid_header_time_buffer.front();
       // printf("[ Data Cut ] wait \n");
       // printf("[ Data Cut ] last_lio_update_time: %lf \n",
@@ -962,6 +1044,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
         return false;
       }
 
+      // // 收集IMU数据
       struct MeasureGroup m;
 
       // printf("[ Data Cut ] LIO \n");
@@ -982,6 +1065,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       mtx_buffer.unlock();
       sig_buffer.notify_all();
 
+      // 处理点云数据
       *(meas.pcl_proc_cur) = *(meas.pcl_proc_next);
       PointCloudXYZI().swap(*meas.pcl_proc_next);
 
@@ -1016,6 +1100,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
         lid_header_time_buffer.pop_front();
       }
 
+      // 处理图像代码
       meas.measures.push_back(m);
       meas.lio_vio_flg = LIO;
       // meas.last_lio_update_time = m.lio_time;
@@ -1028,6 +1113,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 
     case LIO:
     {
+      // 处理VIO更新
       double img_capture_time = img_time_buffer.front() + exposure_time_init;
       meas.lio_vio_flg = VIO;
       // printf("[ Data Cut ] VIO \n");
@@ -1038,6 +1124,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       m.vio_time = img_capture_time;
       m.lio_time = meas.last_lio_update_time;
       m.img = img_buffer.front();
+      // ... 处理图像数据的代码 ...
       mtx_buffer.lock();
       // while ((!imu_buffer.empty() && (imu_time < img_capture_time)))
       // {
@@ -1068,6 +1155,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     break;
   }
 
+  // 仅处理LO
   case ONLY_LO:
   {
     if (!lidar_pushed) 
